@@ -65,18 +65,6 @@ app.use("/api/medicines", medicineRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/cart", cartRoutes);
 
-// Database connection
-mongoose
-  .connect(process.env.MONGO_URI, {
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-  })
-  .then(() => console.log("✅ MongoDB connected successfully"))
-  .catch((err) => {
-    console.error("MongoDB connection error:", err.message);
-    process.exit(1);
-  });
-
 // Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -89,4 +77,23 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Database connection - only start accepting HTTP traffic once Mongo is
+// actually connected. Previously app.listen() ran unconditionally while
+// mongoose.connect() ran in parallel, so the server briefly accepted
+// requests it couldn't serve, then the whole process exited on a DB
+// connection failure - taking down every route (including public ones
+// like GET /api/medicines) at once with connection-refused errors.
+mongoose
+  .connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
+  .then(() => {
+    console.log("✅ MongoDB connected successfully");
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection error:", err.message);
+    process.exit(1);
+  });
