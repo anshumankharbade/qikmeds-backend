@@ -28,6 +28,13 @@ const medicineSchema = new mongoose.Schema(
       min: 0,
       required: true,
     },
+    // Cached AI-generated explanation (array of bullet-point strings).
+    // Generated once on first request and reused after that instead of
+    // calling the LLM API again - see assistantController.js.
+    aiExplanation: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true }
 );
