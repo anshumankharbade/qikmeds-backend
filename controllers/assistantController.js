@@ -32,6 +32,12 @@ const parseFallback = (raw) =>
     .map((line) => line.replace(/^[-*•\d.)\s]+/, "").trim())
     .filter(Boolean);
 
+// Ceiling on the Gemini call itself, kept well under the frontend's timeout
+// for this endpoint (45s - see MedicineAIExplain.jsx) so WE control the
+// failure with a clean, fast 504 instead of the client giving up while the
+// call is left running into the void server-side.
+const AI_TIMEOUT_MS = 20000;
+
 export const explainMedicine = async (req, res) => {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -56,27 +62,39 @@ export const explainMedicine = async (req, res) => {
 
     const { name, description, dosage, manufacturer, category } = medicine;
 
-    const interaction = await ai.interactions.create({
-      model: MODEL,
-      system_instruction: SYSTEM_PROMPT,
-      input: JSON.stringify({
-        name,
-        description,
-        dosage,
-        manufacturer,
-        category,
-      }),
-      generation_config: {
-        thinking_level: "low",
-      },
-      response_format: {
-        type: "text",
-        mime_type: "application/json",
-        schema: explanationSchema,
-      },
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
-    const raw = interaction.output_text || "[]";
+    let response;
+    try {
+      // models.generateContent is the stateless, single-turn call - a
+      // better fit than interactions.create (built for multi-turn,
+      // tool-orchestrating, long-running sessions) for a one-shot lookup
+      // like this. It also takes abortSignal directly, which is what
+      // gives us the timeout below.
+      response = await ai.models.generateContent({
+        model: MODEL,
+        contents: JSON.stringify({
+          name,
+          description,
+          dosage,
+          manufacturer,
+          category,
+        }),
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: "application/json",
+          responseSchema: explanationSchema,
+          // 'HIGH' is the Gemini 3 default; LOW keeps a lookup this small fast.
+          thinkingConfig: { thinkingLevel: "LOW" },
+          abortSignal: controller.signal,
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const raw = response.text || "[]";
 
     let points;
     try {
@@ -91,6 +109,15 @@ export const explainMedicine = async (req, res) => {
 
     res.json({ points, cached: false });
   } catch (error) {
+    if (error.name === "AbortError") {
+      console.error(
+        `AI explain timed out after ${AI_TIMEOUT_MS}ms for medicine ${req.params.id}`
+      );
+      return res.status(504).json({
+        message:
+          "The AI assistant is taking too long to respond. Please try again in a moment.",
+      });
+    }
     console.error("AI explain error:", error.message);
     res
       .status(500)
